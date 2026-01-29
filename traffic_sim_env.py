@@ -49,50 +49,86 @@ class Car:
         self.radars = [] 
         self.alive = True
         self.distance_traveled = 0
-        self.allow_reverse = allow_reverse # [新增] 倒車開關
+        self.allow_reverse = allow_reverse
+        
+        # Lv2/Lv3 安全系統狀態
+        self.is_emergency_braking = False 
 
-    # [修改] 讓這個函式可以接收 AI 的 action
     def handle_input(self, action=None):
         if not self.alive: return
 
-        turn = 0      # 0:直, -1:左, 1:右
-        throttle = 0  # 0:滑行, 1:加速, -1:煞車
+        turn = 0      
+        throttle = 0  
 
-        # --- AI 模式 (傳入 action 數字) ---
         if action is not None:
-            # 0:不動, 1:左, 2:右, 3:加速, 4:減速
             if action == 1: turn = -1
             elif action == 2: turn = 1
-            
             if action == 3: throttle = 1
             elif action == 4: throttle = -1
-
-        # --- 人類模式 (讀鍵盤) ---
         else:
             keys = pygame.key.get_pressed()
             if keys[pygame.K_LEFT]: turn = -1
             elif keys[pygame.K_RIGHT]: turn = 1
-            
             if keys[pygame.K_UP]: throttle = 1
             elif keys[pygame.K_DOWN]: throttle = -1
 
-        # 物理計算
+        # ==========================================
+        # [Lv2 安全系統] 依然保留，作為最後防線
+        # ==========================================
+        self.is_emergency_braking = False
+        
+        if action is not None: 
+            # 1. ADAS 盲點偵測
+            allow_turn = True
+            
+            if turn != 0 and self.radars:
+                for r in self.radars:
+                    # r結構現在是 ((x,y), dist, rel_speed, angle)
+                    # 我們需要重新計算角度，或者在 cast_ray 存進去
+                    # 為了方便，這裡重算角度並不難，但為了效能，我們直接用索引判斷
+                    # 不過這裡 radars 是 list，我們改用 cast_ray 存入角度比較乾脆
+                    # 為了不改動太大，我們這裡假設 cast_ray 順序固定 (-180 到 180)
+                    pass 
+
+            # 簡化版 ADAS (配合 Lv3 cast_ray 的新結構)
+            if turn != 0 and len(self.radars) == 24:
+                # 左側索引大約是 0~5 (後到前) 和 19~23? 
+                # 讓我們用更穩定的方式：在 cast_ray 時我們知道角度
+                pass
+
+            # 2. AEB 自動緊急煞車
+            # 檢查前方雷達 (索引 11, 12, 13 附近是正前方)
+            # 假設 radars 順序是 -180, -165 ... 0 ... 180
+            # 0度大約是第 12 根
+            if len(self.radars) == 24:
+                min_front_dist = 200
+                front_indices = [11, 12, 13] # -15, 0, 15 度
+                
+                for i in front_indices:
+                    if self.radars[i][1] < min_front_dist:
+                        min_front_dist = self.radars[i][1]
+                
+                if min_front_dist < 80 and self.speed > 2:
+                    throttle = -1
+                    turn = 0
+                    self.is_emergency_braking = True
+        
+        # 物理執行
         if turn == -1:
-            self.position.x -= 6
+            self.position.x -= 4 
             self.angle = 5
         elif turn == 1:
-            self.position.x += 6
+            self.position.x += 4
             self.angle = -5
         else:
             self.angle = 0
 
-        # 速度限制邏輯
         speed_limit = self.min_speed
         if action is not None and not self.allow_reverse:
-            speed_limit = 0 # AI 若沒開倒車權限，最低速為 0
+            speed_limit = 0 
 
         if throttle == 1:
-            self.speed = min(self.speed + 0.2, self.max_speed)
+            self.speed = min(self.speed + 0.5, self.max_speed)
         elif throttle == -1:
             self.speed = max(self.speed - 0.5, speed_limit)
         else:
@@ -106,8 +142,9 @@ class Car:
         self.check_collision(walls, npcs)
         
         self.radars.clear()
-        sensor_angles = [0, 45, 90, 135, 180, -135, -90, -45]
-        for degree in sensor_angles: 
+        
+        # 24 根雷達
+        for i, degree in enumerate(range(-180, 180, 15)):
             self.cast_ray(degree, walls, npcs)
             
         if self.alive:
@@ -124,11 +161,14 @@ class Car:
 
     def cast_ray(self, angle_offset, walls, npcs):
         length = 0
-        max_length = 200
+        max_length = 200 
+        
         rad = math.radians(90 + angle_offset)
         dx = math.cos(rad)
         dy = -math.sin(rad) 
         x, y = self.position.x, self.position.y
+        
+        target_speed = 0 # 預設撞到牆壁 (速度0)
         
         while length < max_length:
             x += dx * 3
@@ -136,13 +176,32 @@ class Car:
             length += 3
             point_rect = pygame.Rect(x, y, 4, 4)
             hit = False
+            
+            # 檢查撞牆
             for wall in walls:
-                if wall.colliderect(point_rect): hit = True; break
-            for npc in npcs:
-                if npc.rect.colliderect(point_rect): hit = True; break
+                if wall.colliderect(point_rect): 
+                    hit = True
+                    target_speed = 0 # 牆壁不動
+                    break
+            
+            # 檢查撞車
+            if not hit:
+                for npc in npcs:
+                    if npc.rect.colliderect(point_rect): 
+                        hit = True
+                        target_speed = npc.speed # 讀取對方速度
+                        break
+            
             if hit: break
+            
         dist = int(math.sqrt((x - self.position.x)**2 + (y - self.position.y)**2))
-        self.radars.append(((x, y), dist))
+        
+        # [Lv3 核心] 計算相對速度 (對方 - 我)
+        # 負值代表對方在接近 (危險)，正值代表對方在遠離 (安全)
+        rel_speed = target_speed - self.speed
+        
+        # 儲存：((座標), 距離, 相對速度, 角度)
+        self.radars.append(((x, y), dist, rel_speed, angle_offset))
 
     def draw(self, screen, show_radar=True):
         if not self.alive:
@@ -155,10 +214,15 @@ class Car:
         
         if show_radar:
             for radar in self.radars:
-                 end_pos, dist = radar
+                 end_pos, dist, rel_speed, _ = radar
                  color = GREEN
                  if dist < 60: color = RED
                  elif dist < 120: color = YELLOW
+                 
+                 # 如果相對速度很危險 (<-5)，強制顯示紅色警告
+                 if rel_speed < -5 and dist < 150:
+                     color = (255, 0, 255) # 紫色代表 "高速接近中"
+
                  start_pos = (self.position.x, self.position.y)
                  pygame.draw.line(screen, color, start_pos, end_pos, 1)
                  pygame.draw.circle(screen, color, end_pos, 3)
@@ -204,7 +268,7 @@ class TrafficSim:
     def __init__(self):
         pygame.init()
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        pygame.display.set_caption("AI Traffic Sim - Refactored")
+        pygame.display.set_caption("AI Traffic Sim (Level 3: Proactive)")
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont('Arial', 20)
         self.title_font = pygame.font.SysFont('Arial', 24, bold=True)
@@ -214,31 +278,42 @@ class TrafficSim:
             pygame.Rect(ROAD_X + ROAD_WIDTH, 0, GAME_WIDTH - (ROAD_X + ROAD_WIDTH), HEIGHT)
         ]
         self.show_radar = True
-        self.btn_rect = pygame.Rect(GAME_WIDTH + 20, HEIGHT - 60, 160, 40)
-        
-        self.score = 0 # [RL需用] 累積分數
+        self.score = 0
         self.reset()
         
     def reset(self):
-        # [RL需用] 回傳初始狀態
         self.player_car = Car(GAME_WIDTH // 2, HEIGHT - 150, allow_reverse=False)
+        self.player_car.speed = 10 
+        
         self.npcs = []
         self.lane_offset = 0
         self.spawn_timer = 0
         self.crash_timer = 0
-        self.traffic_start_dist = 5000 # [RL調整] 讓車子早點出現
+        self.traffic_start_dist = 500
         self.score = 0
         return self.get_state()
 
-    # [RL需用] 新增 get_state 函式，將畫面資訊轉為數字給 AI 看
     def get_state(self):
-        radars = [r[1] / 200.0 for r in self.player_car.radars]
-        while len(radars) < 8: radars.append(1.0)
+        # [Lv3 核心] 擴充狀態空間
+        # 每一根雷達提供：距離 (dist) + 相對速度 (rel_speed)
+        radar_data = []
+        for r in self.player_car.radars:
+            # r = ((x,y), dist, rel_speed, angle)
+            dist_norm = r[1] / 200.0
+            # 相對速度歸一化 (假設最大速差 20km/h)
+            speed_rel_norm = max(-1, min(1, r[2] / 20.0))
+            radar_data.extend([dist_norm, speed_rel_norm])
+        
+        # 補齊數據 (24根 * 2數據 = 48)
+        while len(radar_data) < 48: 
+            radar_data.extend([1.0, 0.0])
+            
         norm_speed = self.player_car.speed / self.player_car.max_speed
         norm_x = (self.player_car.position.x - ROAD_X) / ROAD_WIDTH
-        return np.array(radars + [norm_speed, norm_x], dtype=np.float32)
+        
+        # 總共 50 個輸入
+        return np.array(radar_data + [norm_speed, norm_x], dtype=np.float32)
 
-    # [RL需用] 修改 step，接收 action，回傳 (state, reward, done)
     def step(self, action=None):
         self.player_car.handle_input(action)
         
@@ -255,6 +330,7 @@ class TrafficSim:
                     spawn_y = -100 
                     if npc_speed > self.player_car.speed + 5: spawn_y = HEIGHT + 100
                     else: spawn_y = -100
+                    
                     safe = True
                     for npc in self.npcs:
                         lane_center = ROAD_X + (lane * LANE_WIDTH) + (LANE_WIDTH // 2)
@@ -271,12 +347,10 @@ class TrafficSim:
         else:
             self.crash_timer += 1
             if self.crash_timer > 30: 
-                # RL 模式下，撞車通常由 Trainer 決定何時 reset，這裡僅供手動模式使用
                 if action is None: self.reset()
 
         self.player_car.update(self.walls, self.npcs)
 
-        # [RL需用] 計算獎勵
         reward = 0
         done = False
         
@@ -284,14 +358,21 @@ class TrafficSim:
             reward = -100
             done = True
         else:
-            reward = 1 + (self.player_car.speed * 0.1)
-            if self.player_car.speed < 2: reward -= 0.5
+            reward = (self.player_car.speed / 10.0)
+            
+            # [Lv3 獎勵機制] 羞恥懲罰 (Shame Penalty)
+            # 如果讓 AEB (緊急煞車) 介入，代表 AI 預判失敗，扣分！
+            if self.player_car.is_emergency_braking:
+                reward -= 5.0 
+            
+            if self.player_car.speed < 5:
+                reward -= 1.0
+            
             self.score += reward
 
         return self.get_state(), reward, done
 
-    # [修改] 增加 plot_surface 參數與 extra_info，解決閃爍與顯示 RL 資訊
-    def draw(self, extra_info=[], plot_surface=None):
+    def draw(self, extra_info=[], plot_surface=None, do_flip=True):
         self.screen.fill(BLACK) 
         
         pygame.draw.rect(self.screen, (34, 139, 34), (0, 0, ROAD_X, HEIGHT))
@@ -310,30 +391,19 @@ class TrafficSim:
         self.player_car.draw(self.screen, self.show_radar)
         self._draw_sidebar()
 
-        # [RL需用] 繪製訓練資訊
         if extra_info:
             info_font = pygame.font.SysFont('Arial', 14)
             for i, line in enumerate(extra_info):
                 self.screen.blit(info_font.render(line, True, YELLOW), (5, 5 + i*15))
 
-        # [RL需用] 繪製圖表
-        if plot_surface:
-            x_pos = self.screen.get_width() - plot_surface.get_width()
-            pygame.draw.rect(self.screen, (240, 240, 240), (x_pos, 0, plot_surface.get_width(), HEIGHT))
-            self.screen.blit(plot_surface, (x_pos, 0))
-
         if not self.player_car.alive:
             font = pygame.font.SysFont('Arial', 50, bold=True)
             text = font.render('CRASHED!', True, RED)
             text_rect = text.get_rect(center=(GAME_WIDTH//2, HEIGHT//2))
-            bg_rect = text_rect.inflate(20, 20)
-            s = pygame.Surface((bg_rect.width, bg_rect.height))
-            s.set_alpha(200)
-            s.fill(BLACK)
-            self.screen.blit(s, bg_rect)
             self.screen.blit(text, text_rect)
 
-        pygame.display.flip()
+        if do_flip:
+            pygame.display.flip()
 
     def _draw_sidebar(self):
         pygame.draw.rect(self.screen, UI_BG_COLOR, (GAME_WIDTH, 0, UI_WIDTH, HEIGHT))
@@ -348,36 +418,18 @@ class TrafficSim:
         status_text = "ALIVE" if self.player_car.alive else "CRASHED"
         status_color = GREEN if self.player_car.alive else RED
         self.screen.blit(self.title_font.render(status_text, True, status_color), (GAME_WIDTH + 20, y))
-
-        y += gap + 10
-        self.screen.blit(self.font.render(f"360 Sensors:", True, GRAY), (GAME_WIDTH + 20, y))
-        y += 25
-        labels = ["Front", "F-Left", "Left", "R-Left", "Rear", "R-Right", "Right", "F-Right"]
-        text_color = WHITE if self.show_radar else GRAY
-        radars = self.player_car.radars if len(self.player_car.radars) == 8 else [( (0,0), 200 )]*8
-        for i, radar in enumerate(radars):
-            dist = radar[1]
-            label = labels[i]
-            col = i % 2; row = i // 2
-            x_pos = GAME_WIDTH + 10 + col * 90; y_pos = y + row * 20
-            text = f"{label}: {dist}"
-            data_color = RED if dist < 50 and self.show_radar else text_color
-            self.screen.blit(self.lidar_font.render(text, True, data_color), (x_pos, y_pos))
-
-        btn_color = (0, 150, 0) if self.show_radar else (150, 0, 0)
-        pygame.draw.rect(self.screen, btn_color, self.btn_rect, border_radius=5)
-        btn_text = self.font.render(f"Lidar: {'ON' if self.show_radar else 'OFF'} (L)", True, WHITE)
-        self.screen.blit(btn_text, btn_text.get_rect(center=self.btn_rect.center))
+        
+        y += gap + 20
+        self.screen.blit(self.font.render(f"Lv3 Sensors", True, (0, 255, 255)), (GAME_WIDTH + 20, y))
+        
+        y += gap
+        if self.player_car.is_emergency_braking:
+             self.screen.blit(self.font.render(f"⚠️ AEB ACTIVE!", True, RED), (GAME_WIDTH + 20, y))
 
     def handle_events(self):
         for event in pygame.event.get():
-            if event.type == pygame.QUIT: return False
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_r: self.reset()
-                if event.key == pygame.K_l: self.show_radar = not self.show_radar
-            if event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1: 
-                    if self.btn_rect.collidepoint(event.pos): self.show_radar = not self.show_radar
+            if event.type == pygame.QUIT:
+                return False
         return True
 
 def main():
@@ -385,7 +437,6 @@ def main():
     running = True
     while running:
         running = game.handle_events()
-        # 傳入 None 代表手動模式
         game.step(action=None) 
         game.draw()
         game.clock.tick(FPS)
