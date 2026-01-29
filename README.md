@@ -26,6 +26,7 @@
 pip install pygame
 #train模型補充
 pip install torch
+pip install numpy
 
 #已修改的部分
 traffic_sim_env +了：
@@ -35,8 +36,10 @@ traffic_sim_env +了：
 3.AEB 自動緊急煞車 ：當前方雷達偵測到距離過近 (< 80px)，且左右無路可走時，強制覆蓋 AI 的油門指令，直接煞車到底，避免3車包圍還要超車的情況。
 以上是到lv2自動駕駛，下面是嘗試lv3：
 0.輸入層>50
-1.讓雷達能讀取速度
+1.讓雷達能讀取速度,升級閃避系統
 2.避免AI為了獎勵特意頻繁啟動AEB
+3.強制 ACC 定速 (禁止龜速)：防止 AI 因為「神經質」而突然在路中間停車。
+4.添加緊急閃避系統 (EES)，避免後面NPC撞上來
 
 train.py：訓練用py
 play.py：展示用py
