@@ -51,6 +51,7 @@ class Car:
         self.distance_traveled = 0
 
     def handle_input(self):
+        # 僅在手動模式下呼叫此函式
         if not self.alive:
             return
 
@@ -70,7 +71,7 @@ class Car:
         if keys[pygame.K_UP]:
             self.speed = min(self.speed + 0.2, self.max_speed)
         elif keys[pygame.K_DOWN]:
-            self.speed = max(self.speed - 0.5, self.min_speed) # 允許倒車到 -5
+            self.speed = max(self.speed - 0.5, self.min_speed) 
         else:
             # 自然減速 (摩擦力)
             if self.speed > 0:
@@ -90,8 +91,6 @@ class Car:
         # 360度雷達更新
         self.radars.clear()
         # 定義 8 個方向: 0(前), 45(左前), 90(左), 135(左後), 180(後), -135(右後), -90(右), -45(右前)
-        # 為了讓儀表板顯示順序直觀，我們依順時針或逆時針排序
-        # 這裡順序: 前 -> 左前 -> 左 -> 左後 -> 後 -> 右後 -> 右 -> 右前
         sensor_angles = [0, 45, 90, 135, 180, -135, -90, -45]
         
         for degree in sensor_angles: 
@@ -121,7 +120,7 @@ class Car:
         dx = math.cos(rad)
         dy = -math.sin(rad) 
         
-        # 修改點 2: 雷達發射點改為「車身中心」，實現真正的 360 度環景
+        # 雷達發射點：車身中心
         x, y = self.position.x, self.position.y
         
         while length < max_length:
@@ -151,9 +150,6 @@ class Car:
         self.radars.append(((x, y), dist))
 
     def draw(self, screen, show_radar=True):
-        # 為了不讓雷達線蓋住車子，我們先畫雷達，再畫車子 (或者反過來，看需求)
-        # 這裡保持先畫車子，雷達線畫在上面比較清楚看到它射去哪裡
-        
         if not self.alive:
             filter_surf = pygame.Surface(self.image.get_size(), pygame.SRCALPHA)
             filter_surf.fill((255, 0, 0, 100))
@@ -169,7 +165,6 @@ class Car:
                  if dist < 60: color = RED
                  elif dist < 120: color = YELLOW
                  
-                 # 起點是車中心
                  start_pos = (self.position.x, self.position.y)
                  pygame.draw.line(screen, color, start_pos, end_pos, 1)
                  pygame.draw.circle(screen, color, end_pos, 3)
@@ -218,173 +213,126 @@ class NPC_Car:
     def draw(self, screen):
         pygame.draw.rect(screen, self.color, self.rect, border_radius=5)
 
-def draw_sidebar(screen, car, show_radar):
-    pygame.draw.rect(screen, UI_BG_COLOR, (GAME_WIDTH, 0, UI_WIDTH, HEIGHT))
-    pygame.draw.line(screen, WHITE, (GAME_WIDTH, 0), (GAME_WIDTH, HEIGHT), 2)
-    
-    font = pygame.font.SysFont('Arial', 20)
-    title_font = pygame.font.SysFont('Arial', 24, bold=True)
-    
-    screen.blit(title_font.render("Dashboard", True, YELLOW), (GAME_WIDTH + 20, 30))
-    
-    y = 70
-    gap = 35
-    
-    # 速度與距離
-    screen.blit(font.render(f"Speed: {car.speed:.1f} km/h", True, WHITE), (GAME_WIDTH + 20, y))
-    y += gap
-    screen.blit(font.render(f"Dist: {int(car.distance_traveled)} m", True, WHITE), (GAME_WIDTH + 20, y))
-    y += gap
-    
-    # 狀態
-    status_text = "ALIVE" if car.alive else "CRASHED"
-    status_color = GREEN if car.alive else RED
-    screen.blit(title_font.render(status_text, True, status_color), (GAME_WIDTH + 20, y))
-
-    y += gap + 10
-    screen.blit(font.render(f"360 Sensors:", True, GRAY), (GAME_WIDTH + 20, y))
-    y += 25
-    
-    # 顯示 8 個方位的數據
-    lidar_font = pygame.font.SysFont('Arial', 14)
-    text_color = WHITE if show_radar else GRAY
-    
-    labels = ["Front", "F-Left", "Left", "R-Left", "Rear", "R-Right", "Right", "F-Right"]
-    
-    for i, radar in enumerate(car.radars):
-        dist = radar[1]
-        label = labels[i]
-        # 排版：左邊一排，右邊一排
-        col = i % 2 
-        row = i // 2
-        x_pos = GAME_WIDTH + 10 + col * 90
-        y_pos = y + row * 20
+class TrafficSim:
+    """
+    TrafficSim 封裝了所有的遊戲邏輯。
+    這樣設計可以方便未來被強化學習 (RL) 環境調用，
+    也可以被 main() 函式調用來進行手動遊玩。
+    """
+    def __init__(self):
+        pygame.init()
+        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        pygame.display.set_caption("AI Traffic Sim - Refactored")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont('Arial', 20)
+        self.title_font = pygame.font.SysFont('Arial', 24, bold=True)
+        self.lidar_font = pygame.font.SysFont('Arial', 14)
         
-        text = f"{label}: {dist}"
-        # 如果距離過近，數據變紅警告
-        data_color = RED if dist < 50 and show_radar else text_color
+        # 路邊牆壁
+        self.walls = [
+            pygame.Rect(0, 0, ROAD_X, HEIGHT),
+            pygame.Rect(ROAD_X + ROAD_WIDTH, 0, GAME_WIDTH - (ROAD_X + ROAD_WIDTH), HEIGHT)
+        ]
         
-        screen.blit(lidar_font.render(text, True, data_color), (x_pos, y_pos))
+        # 遊戲狀態變數
+        self.reset()
+        
+        # UI 狀態
+        self.show_radar = True
+        self.btn_rect = pygame.Rect(GAME_WIDTH + 20, HEIGHT - 60, 160, 40)
+        
+    def reset(self):
+        """重置遊戲狀態"""
+        self.player_car = Car(GAME_WIDTH // 2, HEIGHT - 150)
+        self.npcs = []
+        self.lane_offset = 0
+        self.spawn_timer = 0
+        self.crash_timer = 0
+        self.traffic_start_dist = 5000
 
-    # 按鈕
-    btn_color = (0, 150, 0) if show_radar else (150, 0, 0)
-    btn_rect = pygame.Rect(GAME_WIDTH + 20, HEIGHT - 60, 160, 40)
-    pygame.draw.rect(screen, btn_color, btn_rect, border_radius=5)
-    btn_text = font.render(f"Lidar: {'ON' if show_radar else 'OFF'} (L)", True, WHITE)
-    screen.blit(btn_text, btn_text.get_rect(center=btn_rect.center))
-    
-    return btn_rect
-
-def main():
-    pygame.init()
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("AI Traffic Sim - Phase I (360 Vision)")
-    clock = pygame.time.Clock()
-
-    player_car = Car(GAME_WIDTH // 2, HEIGHT - 150)
-    
-    walls = [
-        pygame.Rect(0, 0, ROAD_X, HEIGHT),
-        pygame.Rect(ROAD_X + ROAD_WIDTH, 0, GAME_WIDTH - (ROAD_X + ROAD_WIDTH), HEIGHT)
-    ]
-    
-    npcs = []
-    lane_offset = 0
-    spawn_timer = 0
-    crash_timer = 0 
-    TRAFFIC_START_DIST = 10000 
-    
-    show_radar = True
-    btn_rect = pygame.Rect(0, 0, 0, 0)
-
-    running = True
-    while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_r: 
-                    player_car = Car(GAME_WIDTH // 2, HEIGHT - 150)
-                    npcs.clear()
-                    lane_offset = 0
-                    crash_timer = 0
-                if event.key == pygame.K_l: 
-                    show_radar = not show_radar
+    def step(self):
+        """執行一步遊戲邏輯 (Update Loop)"""
+        # 如果是手動模式，這裡處理輸入。
+        # 未來如果是 AI 模式，這裡會接收 action 參數並傳給 player_car.control(action)
+        self.player_car.handle_input()
+        
+        if self.player_car.alive:
+            # 1. 背景捲動邏輯
+            self.lane_offset += self.player_car.speed 
+            if self.lane_offset >= 40: self.lane_offset = 0
+            if self.lane_offset < 0: self.lane_offset = 40 
             
-            if event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1: 
-                    if btn_rect.collidepoint(event.pos):
-                        show_radar = not show_radar
-
-        player_car.handle_input()
-        
-        if player_car.alive:
-            lane_offset += player_car.speed 
-            # 支援倒車的背景捲動 (如果是負速，offset 會減少，看起來像往後退)
-            if lane_offset >= 40: lane_offset = 0
-            if lane_offset < 0: lane_offset = 40 # 處理倒車循環
-            
-            if player_car.distance_traveled > TRAFFIC_START_DIST:
-                spawn_timer += 1
-                if spawn_timer > 40 and random.random() < 0.05:
+            # 2. 生成 NPC 邏輯
+            if self.player_car.distance_traveled > self.traffic_start_dist:
+                self.spawn_timer += 1
+                if self.spawn_timer > 40 and random.random() < 0.05:
                     lane = random.randint(0, NUM_LANES - 1)
                     npc_speed = random.uniform(5, 12)
                     
                     spawn_y = -100 
-                    if npc_speed > player_car.speed + 5: 
+                    if npc_speed > self.player_car.speed + 5: 
                          spawn_y = HEIGHT + 100
                     else:
                          spawn_y = -100
 
                     safe = True
-                    for npc in npcs:
-                        if abs(npc.rect.centerx - (ROAD_X + (lane * LANE_WIDTH) + (LANE_WIDTH // 2))) < 10:
+                    for npc in self.npcs:
+                        # 簡單的重疊檢查
+                        lane_center = ROAD_X + (lane * LANE_WIDTH) + (LANE_WIDTH // 2)
+                        if abs(npc.rect.centerx - lane_center) < 10:
                             if abs(npc.rect.y - spawn_y) < 200:
                                 safe = False
                                 break
                     
                     if safe:
-                        npcs.append(NPC_Car(lane, spawn_y, npc_speed))
-                        spawn_timer = 0
+                        self.npcs.append(NPC_Car(lane, spawn_y, npc_speed))
+                        self.spawn_timer = 0
             
-            for npc in npcs[:]:
-                npc.update(player_car, npcs)
+            # 3. 更新 NPC
+            for npc in self.npcs[:]:
+                npc.update(self.player_car, self.npcs)
                 if npc.rect.y > HEIGHT + 2000 or npc.rect.y < -300:
-                    npcs.remove(npc)
+                    self.npcs.remove(npc)
         else:
-            crash_timer += 1
-            if crash_timer > 30: 
-                player_car = Car(GAME_WIDTH // 2, HEIGHT - 150)
-                npcs.clear()
-                lane_offset = 0
-                crash_timer = 0
+            # 4. 碰撞後重置邏輯
+            self.crash_timer += 1
+            if self.crash_timer > 30: 
+                self.reset()
 
-        player_car.update(walls, npcs)
+        # 5. 更新玩家車輛 (包含雷達與碰撞檢測)
+        self.player_car.update(self.walls, self.npcs)
 
-        screen.fill(BLACK) 
+    def draw(self):
+        """繪製遊戲畫面 (Render Loop)"""
+        self.screen.fill(BLACK) 
         
-        # 畫背景
-        pygame.draw.rect(screen, (34, 139, 34), (0, 0, ROAD_X, HEIGHT))
-        pygame.draw.rect(screen, (34, 139, 34), (ROAD_X + ROAD_WIDTH, 0, GAME_WIDTH - (ROAD_X + ROAD_WIDTH), HEIGHT))
+        # 畫草地
+        pygame.draw.rect(self.screen, (34, 139, 34), (0, 0, ROAD_X, HEIGHT))
+        pygame.draw.rect(self.screen, (34, 139, 34), (ROAD_X + ROAD_WIDTH, 0, GAME_WIDTH - (ROAD_X + ROAD_WIDTH), HEIGHT))
         
-        pygame.draw.line(screen, WHITE, (ROAD_X, 0), (ROAD_X, HEIGHT), 5)
-        pygame.draw.line(screen, WHITE, (ROAD_X + ROAD_WIDTH, 0), (ROAD_X + ROAD_WIDTH, HEIGHT), 5)
+        # 畫路邊線
+        pygame.draw.line(self.screen, WHITE, (ROAD_X, 0), (ROAD_X, HEIGHT), 5)
+        pygame.draw.line(self.screen, WHITE, (ROAD_X + ROAD_WIDTH, 0), (ROAD_X + ROAD_WIDTH, HEIGHT), 5)
         
+        # 畫車道分隔線
         for i in range(1, NUM_LANES):
             x = ROAD_X + i * LANE_WIDTH
             for y in range(-50, HEIGHT, 40):
-                draw_y = y + lane_offset
+                draw_y = y + self.lane_offset
                 if draw_y > HEIGHT: draw_y -= (HEIGHT + 50)
-                pygame.draw.line(screen, WHITE, (x, draw_y), (x, draw_y + 20), 2)
+                pygame.draw.line(self.screen, WHITE, (x, draw_y), (x, draw_y + 20), 2)
 
-        for npc in npcs:
-            npc.draw(screen)
+        # 畫實體
+        for npc in self.npcs:
+            npc.draw(self.screen)
             
-        player_car.draw(screen, show_radar)
+        self.player_car.draw(self.screen, self.show_radar)
         
-        btn_rect = draw_sidebar(screen, player_car, show_radar)
+        # 畫 UI
+        self._draw_sidebar()
 
-        if not player_car.alive:
+        # 撞擊提示
+        if not self.player_car.alive:
             font = pygame.font.SysFont('Arial', 50, bold=True)
             text = font.render('CRASHED!', True, RED)
             text_rect = text.get_rect(center=(GAME_WIDTH//2, HEIGHT//2))
@@ -393,11 +341,94 @@ def main():
             s = pygame.Surface((bg_rect.width, bg_rect.height))
             s.set_alpha(200)
             s.fill(BLACK)
-            screen.blit(s, bg_rect)
-            screen.blit(text, text_rect)
+            self.screen.blit(s, bg_rect)
+            self.screen.blit(text, text_rect)
 
         pygame.display.flip()
-        clock.tick(FPS)
+
+    def _draw_sidebar(self):
+        """內部方法：繪製側邊儀表板"""
+        pygame.draw.rect(self.screen, UI_BG_COLOR, (GAME_WIDTH, 0, UI_WIDTH, HEIGHT))
+        pygame.draw.line(self.screen, WHITE, (GAME_WIDTH, 0), (GAME_WIDTH, HEIGHT), 2)
+        
+        self.screen.blit(self.title_font.render("Dashboard", True, YELLOW), (GAME_WIDTH + 20, 30))
+        
+        y = 70
+        gap = 35
+        
+        # 數據顯示
+        self.screen.blit(self.font.render(f"Speed: {self.player_car.speed:.1f} km/h", True, WHITE), (GAME_WIDTH + 20, y))
+        y += gap
+        self.screen.blit(self.font.render(f"Dist: {int(self.player_car.distance_traveled)} m", True, WHITE), (GAME_WIDTH + 20, y))
+        y += gap
+        
+        status_text = "ALIVE" if self.player_car.alive else "CRASHED"
+        status_color = GREEN if self.player_car.alive else RED
+        self.screen.blit(self.title_font.render(status_text, True, status_color), (GAME_WIDTH + 20, y))
+
+        y += gap + 10
+        self.screen.blit(self.font.render(f"360 Sensors:", True, GRAY), (GAME_WIDTH + 20, y))
+        y += 25
+        
+        labels = ["Front", "F-Left", "Left", "R-Left", "Rear", "R-Right", "Right", "F-Right"]
+        text_color = WHITE if self.show_radar else GRAY
+        
+        for i, radar in enumerate(self.player_car.radars):
+            dist = radar[1]
+            label = labels[i]
+            col = i % 2 
+            row = i // 2
+            x_pos = GAME_WIDTH + 10 + col * 90
+            y_pos = y + row * 20
+            
+            text = f"{label}: {dist}"
+            data_color = RED if dist < 50 and self.show_radar else text_color
+            self.screen.blit(self.lidar_font.render(text, True, data_color), (x_pos, y_pos))
+
+        # 按鈕繪製
+        btn_color = (0, 150, 0) if self.show_radar else (150, 0, 0)
+        pygame.draw.rect(self.screen, btn_color, self.btn_rect, border_radius=5)
+        btn_text = self.font.render(f"Lidar: {'ON' if self.show_radar else 'OFF'} (L)", True, WHITE)
+        self.screen.blit(btn_text, btn_text.get_rect(center=self.btn_rect.center))
+
+    def handle_events(self):
+        """處理 Pygame 事件 (Quit, Keys, Mouse)"""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return False
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_r: 
+                    self.reset()
+                if event.key == pygame.K_l: 
+                    self.show_radar = not self.show_radar
+            
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1: 
+                    if self.btn_rect.collidepoint(event.pos):
+                        self.show_radar = not self.show_radar
+        return True
+
+def main():
+    """
+    主程式進入點：
+    現在它只是一個『驅動器』，負責建立 TrafficSim 物件並呼叫 step/draw。
+    這跟未來 RL 訓練程式呼叫 env.step() 的結構是一模一樣的。
+    """
+    game = TrafficSim()
+    running = True
+    
+    while running:
+        # 1. 處理系統事件
+        running = game.handle_events()
+        
+        # 2. 執行遊戲邏輯 (Step)
+        game.step()
+        
+        # 3. 渲染畫面 (Render)
+        game.draw()
+        
+        # 4. 控制幀率
+        game.clock.tick(FPS)
 
     pygame.quit()
 
