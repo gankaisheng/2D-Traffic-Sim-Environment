@@ -26,6 +26,7 @@ BLUE = (0, 0, 255)
 YELLOW = (255, 255, 0)
 GRAY = (100, 100, 100)
 UI_BG_COLOR = (50, 50, 60)
+PURPLE = (255, 0, 255) # EES 觸發時的顏色
 
 class Car:
     def __init__(self, x, y, allow_reverse=False):
@@ -51,8 +52,9 @@ class Car:
         self.distance_traveled = 0
         self.allow_reverse = allow_reverse
         
-        # Lv2/Lv3 安全系統狀態
+        # 狀態標記
         self.is_emergency_braking = False 
+        self.is_ees_active = False # [新增] 緊急閃避狀態
 
     def handle_input(self, action=None):
         if not self.alive: return
@@ -73,47 +75,69 @@ class Car:
             elif keys[pygame.K_DOWN]: throttle = -1
 
         # ==========================================
-        # [Lv2 安全系統] 依然保留，作為最後防線
+        # 安全輔助系統 (Safety Systems)
         # ==========================================
         self.is_emergency_braking = False
+        self.is_ees_active = False
         
         if action is not None: 
-            # 1. ADAS 盲點偵測
+            # 1. ADAS 盲點偵測 (防側撞)
             allow_turn = True
-            
-            if turn != 0 and self.radars:
-                for r in self.radars:
-                    # r結構現在是 ((x,y), dist, rel_speed, angle)
-                    # 我們需要重新計算角度，或者在 cast_ray 存進去
-                    # 為了方便，這裡重算角度並不難，但為了效能，我們直接用索引判斷
-                    # 不過這裡 radars 是 list，我們改用 cast_ray 存入角度比較乾脆
-                    # 為了不改動太大，我們這裡假設 cast_ray 順序固定 (-180 到 180)
-                    pass 
-
-            # 簡化版 ADAS (配合 Lv3 cast_ray 的新結構)
             if turn != 0 and len(self.radars) == 24:
-                # 左側索引大約是 0~5 (後到前) 和 19~23? 
-                # 讓我們用更穩定的方式：在 cast_ray 時我們知道角度
-                pass
+                for r in self.radars:
+                    # r: ((x,y), dist, rel_speed, angle)
+                    angle = r[3]
+                    dist = r[1]
+                    if turn == -1: # 左轉
+                        if -110 <= angle <= -70 and dist < 60:
+                            allow_turn = False; break
+                    elif turn == 1: # 右轉
+                        if 70 <= angle <= 110 and dist < 60:
+                            allow_turn = False; break
+            if not allow_turn: turn = 0
 
-            # 2. AEB 自動緊急煞車
-            # 檢查前方雷達 (索引 11, 12, 13 附近是正前方)
-            # 假設 radars 順序是 -180, -165 ... 0 ... 180
-            # 0度大約是第 12 根
+            # 2. EES 後方緊急閃避 (Emergency Evasion System)
+            # 邏輯：如果屁股後面有車衝過來，不管前方怎樣，先踩油門再說
+            if len(self.radars) == 24:
+                rear_danger = False
+                for r in self.radars:
+                    angle = r[3]
+                    dist = r[1]
+                    rel_speed = r[2] # 對方速度 - 我方速度
+                    
+                    # 檢查正後方 (-165 ~ 180 ~ 165)
+                    if angle <= -165 or angle >= 165:
+                        # 條件：距離近 (<80) 且 對方比我快很多 (rel_speed > 2)
+                        # 正值代表對方正在接近我 (追撞風險)
+                        # 注意：這裡的 rel_speed 計算方式取決於 cast_ray 的寫法
+                        # 我們在 cast_ray 寫的是 target_speed - self.speed
+                        # 如果對方快(10)，我慢(5)，結果是 5 (正值危險)
+                        if dist < 80 and rel_speed > 2:
+                            rear_danger = True
+                            break
+                
+                if rear_danger:
+                    throttle = 1 # 強制補油門逃跑！
+                    self.is_ees_active = True
+
+            # 3. AEB 自動緊急煞車 (防追撞前車)
+            # AEB 的優先級最高 (Priority High)，因為撞前車比被後車撞更痛
             if len(self.radars) == 24:
                 min_front_dist = 200
-                front_indices = [11, 12, 13] # -15, 0, 15 度
-                
-                for i in front_indices:
-                    if self.radars[i][1] < min_front_dist:
-                        min_front_dist = self.radars[i][1]
+                for r in self.radars:
+                    if -15 <= r[3] <= 15:
+                        if r[1] < min_front_dist:
+                            min_front_dist = r[1]
                 
                 if min_front_dist < 80 and self.speed > 2:
                     throttle = -1
                     turn = 0
                     self.is_emergency_braking = True
-        
+                    self.is_ees_active = False # 如果前方有牆，取消閃避，優先煞車
+
+        # ==========================================
         # 物理執行
+        # ==========================================
         if turn == -1:
             self.position.x -= 4 
             self.angle = 5
@@ -128,7 +152,10 @@ class Car:
             speed_limit = 0 
 
         if throttle == 1:
-            self.speed = min(self.speed + 0.5, self.max_speed)
+            # EES 觸發時，給予額外的瞬間加速力 (彈射起步)
+            accel = 0.5
+            if self.is_ees_active: accel = 0.8 
+            self.speed = min(self.speed + accel, self.max_speed)
         elif throttle == -1:
             self.speed = max(self.speed - 0.5, speed_limit)
         else:
@@ -143,7 +170,6 @@ class Car:
         
         self.radars.clear()
         
-        # 24 根雷達
         for i, degree in enumerate(range(-180, 180, 15)):
             self.cast_ray(degree, walls, npcs)
             
@@ -168,7 +194,7 @@ class Car:
         dy = -math.sin(rad) 
         x, y = self.position.x, self.position.y
         
-        target_speed = 0 # 預設撞到牆壁 (速度0)
+        target_speed = 0 
         
         while length < max_length:
             x += dx * 3
@@ -177,30 +203,22 @@ class Car:
             point_rect = pygame.Rect(x, y, 4, 4)
             hit = False
             
-            # 檢查撞牆
             for wall in walls:
                 if wall.colliderect(point_rect): 
-                    hit = True
-                    target_speed = 0 # 牆壁不動
-                    break
+                    hit = True; target_speed = 0; break
             
-            # 檢查撞車
             if not hit:
                 for npc in npcs:
                     if npc.rect.colliderect(point_rect): 
-                        hit = True
-                        target_speed = npc.speed # 讀取對方速度
-                        break
+                        hit = True; target_speed = npc.speed; break
             
             if hit: break
             
         dist = int(math.sqrt((x - self.position.x)**2 + (y - self.position.y)**2))
-        
-        # [Lv3 核心] 計算相對速度 (對方 - 我)
-        # 負值代表對方在接近 (危險)，正值代表對方在遠離 (安全)
+        # 計算相對速度：(目標 - 我)
+        # 如果追撞：目標快(10) - 我慢(5) = 5 (正值危險)
         rel_speed = target_speed - self.speed
         
-        # 儲存：((座標), 距離, 相對速度, 角度)
         self.radars.append(((x, y), dist, rel_speed, angle_offset))
 
     def draw(self, screen, show_radar=True):
@@ -214,19 +232,20 @@ class Car:
         
         if show_radar:
             for radar in self.radars:
-                 end_pos, dist, rel_speed, _ = radar
+                 end_pos, dist, rel_speed, angle = radar
                  color = GREEN
                  if dist < 60: color = RED
                  elif dist < 120: color = YELLOW
                  
-                 # 如果相對速度很危險 (<-5)，強制顯示紅色警告
-                 if rel_speed < -5 and dist < 150:
-                     color = (255, 0, 255) # 紫色代表 "高速接近中"
+                 # 後方追撞警告 (紫色)
+                 if (angle <= -160 or angle >= 160) and dist < 100 and rel_speed > 1:
+                     color = PURPLE
 
                  start_pos = (self.position.x, self.position.y)
                  pygame.draw.line(screen, color, start_pos, end_pos, 1)
                  pygame.draw.circle(screen, color, end_pos, 3)
 
+# --- NPC 類別 (維持原樣，不做修改，因為您說不要修改A) ---
 class NPC_Car:
     def __init__(self, lane_index, start_y, speed):
         lane_x = ROAD_X + (lane_index * LANE_WIDTH) + (LANE_WIDTH // 2)
@@ -268,7 +287,7 @@ class TrafficSim:
     def __init__(self):
         pygame.init()
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        pygame.display.set_caption("AI Traffic Sim (Level 3: Proactive)")
+        pygame.display.set_caption("AI Traffic Sim (EES Active)")
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont('Arial', 20)
         self.title_font = pygame.font.SysFont('Arial', 24, bold=True)
@@ -294,24 +313,18 @@ class TrafficSim:
         return self.get_state()
 
     def get_state(self):
-        # [Lv3 核心] 擴充狀態空間
-        # 每一根雷達提供：距離 (dist) + 相對速度 (rel_speed)
         radar_data = []
         for r in self.player_car.radars:
-            # r = ((x,y), dist, rel_speed, angle)
             dist_norm = r[1] / 200.0
-            # 相對速度歸一化 (假設最大速差 20km/h)
             speed_rel_norm = max(-1, min(1, r[2] / 20.0))
             radar_data.extend([dist_norm, speed_rel_norm])
         
-        # 補齊數據 (24根 * 2數據 = 48)
         while len(radar_data) < 48: 
             radar_data.extend([1.0, 0.0])
             
         norm_speed = self.player_car.speed / self.player_car.max_speed
         norm_x = (self.player_car.position.x - ROAD_X) / ROAD_WIDTH
         
-        # 總共 50 個輸入
         return np.array(radar_data + [norm_speed, norm_x], dtype=np.float32)
 
     def step(self, action=None):
@@ -359,15 +372,8 @@ class TrafficSim:
             done = True
         else:
             reward = (self.player_car.speed / 10.0)
-            
-            # [Lv3 獎勵機制] 羞恥懲罰 (Shame Penalty)
-            # 如果讓 AEB (緊急煞車) 介入，代表 AI 預判失敗，扣分！
-            if self.player_car.is_emergency_braking:
-                reward -= 5.0 
-            
-            if self.player_car.speed < 5:
-                reward -= 1.0
-            
+            if self.player_car.is_emergency_braking: reward -= 5.0 
+            if self.player_car.speed < 5: reward -= 1.0
             self.score += reward
 
         return self.get_state(), reward, done
@@ -424,7 +430,9 @@ class TrafficSim:
         
         y += gap
         if self.player_car.is_emergency_braking:
-             self.screen.blit(self.font.render(f"⚠️ AEB ACTIVE!", True, RED), (GAME_WIDTH + 20, y))
+             self.screen.blit(self.font.render(f"⚠️ AEB BRAKE", True, RED), (GAME_WIDTH + 20, y))
+        elif self.player_car.is_ees_active:
+             self.screen.blit(self.font.render(f"⚡️ EES ESCAPE!", True, PURPLE), (GAME_WIDTH + 20, y)) # [新增] EES 狀態顯示
 
     def handle_events(self):
         for event in pygame.event.get():
